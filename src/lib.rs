@@ -21,6 +21,7 @@ pub struct ExecutionUnit {
     total_groups: Arc<i32>,
     current_group_idx: Arc<i32>,
     action: Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
+    on_fail_action : Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
 }
 
 impl ExecutionUnit {
@@ -35,6 +36,7 @@ impl ExecutionUnit {
             total_groups: Arc::new(0),
             current_group_idx: Arc::new(0),
             action: Some(Box::new(action)),
+            on_fail_action : None,
         }
     }
 
@@ -44,6 +46,14 @@ impl ExecutionUnit {
 
     pub fn set_group_index(&mut self, index: i32) {
         self.current_group_idx = Arc::new(index);
+    }
+
+    ///If it fails, the state calls this action instead of terminating the programme.
+    pub fn set_fail_action<F>(&mut self, action: F)
+    where
+        F : FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static,
+    {
+        self.on_fail_action = Some(Box::new(action));
     }
 
     /// Handles the visual feedback (spinner and status) in the terminal.
@@ -74,22 +84,89 @@ impl ExecutionUnit {
                     let output = format!("[{}/{}] {} ✘", self.current_group_idx, self.total_groups, self.description);
                     print!("\r\x1b[2K");
                     println!("{}", output.red());
-                    std::process::exit(1);
                 }
             }
             thread::sleep(Duration::from_millis(100));
         }
     }
 
-    /// Spawns the logic thread and starts the display loop.
+    /// Registers an action to be executed if the task fails.
+    ///
+    /// # Important
+    ///
+    /// The callback **MUST** do one of these two things:
+    ///
+    /// 1. **Call `std::process::exit(1)`** to terminate the program
+    /// 2. **Change the status** to another state (NOT recommended)
+    ///
+    /// If it does neither, **it will enter an infinite loop**
+    /// repeatedly printing the failure message.
+    ///
+    /// # Correct Example
+    ///
+    /// ```rust
+    /// let mut task = ExecutionUnit::new("Migrate DB", |status| {
+    ///     migrate_db().unwrap();
+    ///     *status.lock().unwrap() = ExecutionStatus::Completed;
+    /// });
+    ///
+    /// task.set_fail_action(|status| {
+    ///     println!("Rollback executed");
+    ///     rollback_migration();
+    ///     std::process::exit(1);  // ← IMPORTANT
+    /// });
+    /// ```
+    ///
+    /// # Incorrect Example (infinite loop)
+    ///
+    /// ```rust,no_run
+    /// task.set_fail_action(|status| {
+    ///     println!("This will print infinitely");
+    ///     // ← Missing exit(1) here
+    /// });
+    /// ```
     pub fn execute(&mut self) {
-        if let Some(logic) = self.action.take() {
-            let status_ptr = Arc::clone(&self.status);
-            thread::spawn(move || {
-                logic(status_ptr);
-            });
-        }
+
+        let status = self.status.clone();
+        let on_fail = self.on_fail_action.take();
+        let action = self.action.take().unwrap();
+
+        let description = self.description.clone();
+        let current_idx = self.current_group_idx.clone();
+        let total = self.total_groups.clone();
+
+        let handle = thread::spawn(move || {
+            action(status.clone());
+
+
+            let final_status = {
+                let guard = status.lock().unwrap();
+                *guard
+            };
+
+
+            if final_status == ExecutionStatus::Failed {
+                if let Some(callback) = on_fail {
+                    callback(status.clone());
+                }
+            }
+        });
+
+
         self.display_progress();
+
+
+        handle.join().unwrap();
+
+
+        let final_status = {
+            let guard = self.status.lock().unwrap();
+            *guard
+        };
+
+        if final_status == ExecutionStatus::Failed {
+            std::process::exit(1);
+        }
     }
 }
 
