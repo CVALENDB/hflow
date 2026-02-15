@@ -20,25 +20,26 @@ pub struct ExecutionUnit {
     description: Arc<String>,
     total_groups: Arc<i32>,
     current_group_idx: Arc<i32>,
-    action: Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
-    on_fail_action : Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
+    execute: Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
+    on_failure : Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
+    on_sucess : Option<Box<dyn FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static>>,
 }
 
 impl ExecutionUnit {
     /// Creates a new execution unit with a description and the closure to execute.
-    pub fn new<F>(description: String, action: F) -> Self
-    where
-        F: FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static,
-    {
+    pub fn new(description: String) -> Self {
+
         Self {
             status: Arc::new(Mutex::new(ExecutionStatus::InProgress)),
             description: Arc::new(description),
             total_groups: Arc::new(0),
             current_group_idx: Arc::new(0),
-            action: Some(Box::new(action)),
-            on_fail_action : None,
+            execute: None,
+            on_failure : None,
+            on_sucess : None,
         }
     }
+
 
     pub fn set_total_groups(&mut self, total: i32) {
         self.total_groups = Arc::new(total);
@@ -48,12 +49,31 @@ impl ExecutionUnit {
         self.current_group_idx = Arc::new(index);
     }
 
+    ///thirst for the main callback
+    pub fn on_execute<F>(mut self, callback: F) -> Self
+    where
+        F: 'static + FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static,
+    {
+        self.execute = Some(Box::new(callback));
+        self
+    }
+
     ///If it fails, the state calls this action instead of terminating the programme.
-    pub fn set_fail_action<F>(&mut self, action: F)
+    pub fn on_failure<F>(mut self, action: F) -> Self
     where
         F : FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static,
     {
-        self.on_fail_action = Some(Box::new(action));
+        self.on_failure = Some(Box::new(action));
+        self
+    }
+
+    ///This function is invoked if the status changes to complete.
+    pub fn on_success<F>(mut self, action: F) -> Self
+    where
+        F : FnOnce(Arc<Mutex<ExecutionStatus>>) + Send + 'static,
+    {
+        self.on_sucess = Some(Box::new(action));
+        self
     }
 
     /// Handles the visual feedback (spinner and status) in the terminal.
@@ -128,8 +148,9 @@ impl ExecutionUnit {
     pub fn execute(&mut self) {
 
         let status = self.status.clone();
-        let on_fail = self.on_fail_action.take();
-        let action = self.action.take().unwrap();
+        let on_fail = self.on_failure.take();
+        let action = self.execute.take().unwrap();
+        let success = self.on_sucess.take();
 
         let description = self.description.clone();
         let current_idx = self.current_group_idx.clone();
@@ -144,10 +165,18 @@ impl ExecutionUnit {
                 *guard
             };
 
+            if final_status == ExecutionStatus::Completed {
+                if let Some(callback) = success {
+                    callback(status.clone());
+                }
+            }
 
             if final_status == ExecutionStatus::Failed {
                 if let Some(callback) = on_fail {
+                    println!("tenemos fail");
                     callback(status.clone());
+                } else {
+                    println!("no tenemos fail");
                 }
             }
         });
